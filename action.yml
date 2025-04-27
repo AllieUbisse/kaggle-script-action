@@ -119,7 +119,9 @@ runs:
       
         WORKING_SUBDIR="${{ inputs.working_subdir }}"
         TARGET_DIR="/kaggle/working/$REPO_NAME${WORKING_SUBDIR:+/$WORKING_SUBDIR}"
-        dependencies="!cd $TARGET_DIR && pip install -r requirements.txt"
+        
+        # Conditionally add dependency installation only if requirements.txt exists
+        dependencies="!cd /kaggle/working/$REPO_NAME && if [ -f \"${WORKING_SUBDIR:+$WORKING_SUBDIR/}requirements.txt\" ]; then pip install -r ${WORKING_SUBDIR:+$WORKING_SUBDIR/}requirements.txt; else echo \"No requirements.txt found, skipping dependencies installation\"; fi"
         
         log_message "Adding dependency installation script to notebook: $dependencies"
         log_message "Adding custom script to notebook: $CUSTOM_SCRIPT"
@@ -163,7 +165,7 @@ runs:
             },
             "language_info": {
               "name": "python",
-              "version": "3.8"
+              "version": "3.10"
             }
           },
           "nbformat": 4,
@@ -215,6 +217,24 @@ runs:
                                            .enable_internet = $enable_internet |
                                            .enable_tpu = $enable_tpu')
         
+        # Add dataset sources if provided
+        if [ -n "${{ inputs.dataset_sources }}" ]; then
+          dataset_array=$(echo "${{ inputs.dataset_sources }}" | jq -R 'split(",") | map(trim)')
+          metadata=$(echo "$metadata" | jq --argjson datasets "$dataset_array" '.dataset_sources = $datasets')
+        fi
+        
+        # Add competition sources if provided
+        if [ -n "${{ inputs.competition_sources }}" ]; then
+          competition_array=$(echo "${{ inputs.competition_sources }}" | jq -R 'split(",") | map(trim)')
+          metadata=$(echo "$metadata" | jq --argjson competitions "$competition_array" '.competition_sources = $competitions')
+        fi
+        
+        # Add kernel sources if provided
+        if [ -n "${{ inputs.kernel_sources }}" ]; then
+          kernel_array=$(echo "${{ inputs.kernel_sources }}" | jq -R 'split(",") | map(trim)')
+          metadata=$(echo "$metadata" | jq --argjson kernels "$kernel_array" '.kernel_sources = $kernels')
+        fi
+        
         echo "Saving updated metadata back to $json_path"
         echo "$metadata" | jq '.' > "$json_path"
         
@@ -233,7 +253,6 @@ runs:
         raw_kernel_name="${{ inputs.title }}"
         kernel_slug=$(echo "$raw_kernel_name" | tr '[:upper:]' '[:lower:]' | sed 's/ /-/g')
         kernel_name="${username}/${kernel_slug}"
-        action_path="${{ github.action_path }}"
         action_path=$(realpath "${{ github.action_path }}")
         echo "Checking status for Kaggle kernel: '$kernel_name'"
         
@@ -270,11 +289,13 @@ runs:
         kaggle kernels output "$kernel_name" -p . 2>&1
         
         if [ -f "$log_file" ]; then
+            # Only look for critical errors, ignoring debugger warnings
             tail -n 50 "$log_file" | jq -c '.[]' | while IFS= read -r entry; do
                 data_field=$(echo "$entry" | jq -r '.data')
                 [[ -n "$data_field" ]] && log_message "$data_field"
                 
-                if echo "$data_field" | grep -Ei "Error|Traceback|Exception|404 Client Error|failed|FAIL"; then
+                # Filter out debugger warnings about frozen modules
+                if echo "$data_field" | grep -Ei "Error|Traceback|Exception|404 Client Error|failed|FAIL" | grep -v "Debugger warning" | grep -v "frozen modules"; then
                     log_message "::error::Error found in log: $data_field"
                     exit 1
                 fi
@@ -288,8 +309,6 @@ runs:
         if [[ "$status" == *"403"* || "$status" == *"denied"* || "$status" == *"error"* || "$status" == *"cancel"* || "$status" == *"failed"* ]]; then
             exit 1
         fi
-
-
 
 branding:
   icon: upload
